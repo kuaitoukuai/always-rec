@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!-- 注意：这里刻意不声明 RECEIVE_BOOT_COMPLETED。
+         Android 14+ 明确禁止 BOOT_COMPLETED 启动 microphone 类型前台服务，
+         声明了也用不上，反而会让用户误以为能开机自启。 -->
+
+    <application
+        android:allowBackup="false"
+        android:label="常驻录音"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.Material3.DayNight.NoActionBar">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTop">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <activity
+            android:name=".SummaryActivity"
+            android:exported="false"
+            android:label="今日记录"
+            android:parentActivityName=".MainActivity" />
+
+        <!-- foregroundServiceType 必须声明 microphone，否则 Android 14+ 会抛
+             MissingForegroundServiceTypeException -->
+        <service
+            android:name=".RecorderService"
+            android:exported="false"
+            android:foregroundServiceType="microphone" />
+
+    </application>
+
+</manifest>

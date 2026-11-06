@@ -1,0 +1,44 @@
+# Android / Gradle
+*.iml
+.gradle/
+local.properties
+build/
+captures/
+.externalNativeBuild/
+.cxx/
+*.apk
+*.aab
+*.ap_
+*.dex
+
+# 凭据 —— 绝对不能提交
+backend/config.json
+**/baidu_cookies.json
+*.keystore
+*.jks
+
+# 运行数据与产物
+backend/data/
+backend/output/
+backend/test_clips/
+backend/__pycache__/
+__pycache__/
+*.pyc
+
+# 音频（含真实对话，禁止入库）
+*.aac
+*.wav
+*.mp3
+*.m4a
+
+# 临时文件
+u*.xml
+ui.xml
+shot_*.png
+test_rec.aac
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini

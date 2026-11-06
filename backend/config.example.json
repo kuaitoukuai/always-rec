@@ -1,0 +1,28 @@
+{
+  "baidu": {
+    "cookie_file": "REPLACE_ME/path/to/baidu_cookies.json",
+    "remote_dir": "/录音记录"
+  },
+  "asr": {
+    "backend": "dashscope",
+    "api_key": "sk-REPLACE_ME",
+    "model": "qwen3-asr-flash",
+    "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    "language": "zh",
+    "model_local": "small",
+    "device": "cpu",
+    "compute_type": "int8",
+    "beam_size": 5,
+    "vad_threshold": 0.55,
+    "initial_prompt": ""
+  },
+  "llm": {
+    "enabled": false,
+    "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    "api_key_env": "DASHSCOPE_API_KEY",
+    "model": "qwen-plus"
+  },
+  "output_dir": "./output",
+  "work_dir": "./data",
+  "min_segment_seconds": 1.0
+}
