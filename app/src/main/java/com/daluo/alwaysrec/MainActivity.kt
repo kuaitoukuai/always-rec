@@ -82,6 +82,14 @@ class MainActivity : AppCompatActivity() {
             setTextColor(Color.parseColor("#111111"))
         })
 
+        // 两台手机装同一个包，靠这一行确认当前是哪台、数据会传到哪个目录
+        root.addView(TextView(this).apply {
+            text = "设备：${DeviceInfo.label(this@MainActivity)} · ${DeviceInfo.model()}"
+            textSize = 12f
+            setTextColor(Color.parseColor("#9AA0A8"))
+            setPadding(0, (4 * resources.displayMetrics.density).toInt(), 0, 0)
+        })
+
         statusView = TextView(this).apply {
             text = "已停止"
             textSize = 15f

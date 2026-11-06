@@ -65,18 +65,42 @@ class BaiduPan:
 
     # ---------- 读 ----------
 
-    def list_dir(self, remote_dir: str, limit: int = 1000) -> list[dict]:
-        params = self._base_params()
-        params.update(
-            {"dir": remote_dir, "order": "time", "start": 0, "limit": limit, "logid": self._logid()}
-        )
-        r = self.sess.get(
-            "https://pan.baidu.com/api/list", params=params, headers=self._headers(), timeout=30
-        )
-        j = r.json()
-        if j.get("errno") != 0:
-            raise BaiduPanError(f"list({remote_dir}) errno={j.get('errno')} {r.text[:200]}")
-        return j.get("list", [])
+    def list_dir(self, remote_dir: str, limit: int = 1000, max_items: int = 50_000) -> list[dict]:
+        """
+        列目录，自动翻页。
+
+        网盘单次最多返回 limit 项（默认 1000）。原来只取第一页，
+        日积月累超过 1000 个片段后，后面的文件会"凭空消失"。
+        """
+        out: list[dict] = []
+        start = 0
+        while start < max_items:
+            params = self._base_params()
+            params.update(
+                {
+                    "dir": remote_dir,
+                    "order": "time",
+                    "start": start,
+                    "limit": limit,
+                    "logid": self._logid(),
+                }
+            )
+            r = self.sess.get(
+                "https://pan.baidu.com/api/list",
+                params=params,
+                headers=self._headers(),
+                timeout=30,
+            )
+            j = r.json()
+            if j.get("errno") != 0:
+                raise BaiduPanError(f"list({remote_dir}) errno={j.get('errno')} {r.text[:200]}")
+
+            items = j.get("list", [])
+            out.extend(items)
+            if len(items) < limit:
+                break
+            start += limit
+        return out
 
     def exists(self, remote_dir: str) -> bool:
         try:
@@ -235,16 +259,32 @@ class BaiduPan:
         return info[0]["dlink"]
 
     def download(self, remote_path: str, local_path: str) -> int:
+        """
+        先写 .part，校验字节数后再改名。
+        否则网络中断留下的半截文件会被后续流程当成完整音频，
+        转写出来是空的，还会被永久缓存成"这段没人说话"。
+        """
         dlink = self.get_dlink(remote_path)
         os.makedirs(os.path.dirname(local_path) or ".", exist_ok=True)
+        tmp = local_path + ".part"
         with self.sess.get(
             dlink, headers=self._headers(), stream=True, timeout=120, allow_redirects=True
         ) as r:
             r.raise_for_status()
+            expected = int(r.headers.get("Content-Length") or 0)
             total = 0
-            with open(local_path, "wb") as f:
+            with open(tmp, "wb") as f:
                 for block in r.iter_content(256 * 1024):
                     if block:
                         f.write(block)
                         total += len(block)
+
+        if expected and total != expected:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+            raise BaiduPanError(f"下载不完整 {remote_path}: {total}/{expected}")
+
+        os.replace(tmp, local_path)
         return total

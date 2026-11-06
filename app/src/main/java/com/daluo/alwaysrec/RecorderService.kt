@@ -204,6 +204,16 @@ class RecorderService : Service() {
     private fun startCapture() {
         if (running) return
         running = true
+
+        // 上一次如果被 ROM 杀掉，可能留下只有 .aac 没有 .meta 的片段，
+        // 那些片段永远不会进上传队列，这里先补 meta 救回来。
+        val rescued = runCatching { Spool(this).recoverOrphans() }.getOrDefault(0)
+        if (rescued > 0) {
+            android.util.Log.i("AlwaysRec", "恢复 $rescued 个孤儿片段")
+            TranscribeWorker.enqueue(this)
+            UploadWorker.runOnWifi(this)
+        }
+
         registerWifiWatcher()
         startHeartbeat()
         captureJob = scope.launch { captureLoop() }

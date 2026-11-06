@@ -94,21 +94,38 @@
 
 ### 4.1 配置凭据
 
+后端：
+
 ```bash
 cp backend/config.example.json backend/config.json
 # 编辑 config.json，填 api_key 和 cookie_file 的绝对路径
 ```
 
-编辑 `app/src/main/java/com/daluo/alwaysrec/LocalConfig.kt`：
+App 侧不要改源码，写在根目录 `local.properties`（已被 `.gitignore` 忽略）：
 
-```kotlin
-const val UPLOAD_MODE = "baidu"
-const val BAIDU_BDUSS = "..."       // 同 baidu_cookies.json
-const val BAIDU_STOKEN = "..."
-const val BAIDU_BDSTOKEN = "..."
-const val BAIDU_DIR = "/录音记录"
-const val ALIYUN_API_KEY = "sk-..."
+```properties
+sdk.dir=D:/tools/android-sdk
+baidu.bduss=9ibTAyZ05...        # 同 baidu_cookies.json 的 cookies.BDUSS
+baidu.stoken=1892ae98...        # cookies.STOKEN
+baidu.bdstoken=674863b6...      # baidu_cookies.json 顶层的 bdstoken
+dashscope.key=sk-...
 ```
+
+`app/build.gradle.kts` 会在构建时把这些值注入成 `BuildConfig.BAIDU_BDUSS` 等常量，
+`LocalConfig` 只负责读取。这样仓库里可以公开，凭据只留在本机。
+
+有网盘凭据时 `UPLOAD_MODE` 自动为 `baidu`，不需要手改。
+
+### 4.1.1 给设备起名字（多台手机时必做）
+
+网盘目录按设备隔离：`/录音记录/<设备名>/<日期>/`。默认设备名是「机型-哈希」，
+想改成「备用机」「主力机」这种，装完 App 后执行：
+
+```bash
+adb shell "run-as com.daluo.alwaysrec sh -c 'echo 备用机 > files/device_name.txt'"
+```
+
+改完重启 App 生效，界面第二行会显示当前设备名。
 
 ### 4.2 编译
 

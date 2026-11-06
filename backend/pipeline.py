@@ -32,6 +32,8 @@ class Clip:
     clip_id: str
     start: datetime
     duration_ms: int = 0
+    # 设备名，对应网盘上的子目录；空字符串表示老布局（所有设备混在一起）
+    device: str = ""
 
     @property
     def seconds(self) -> float:
@@ -98,7 +100,12 @@ def collect_local(src: str) -> list[Clip]:
     return sorted(clips, key=lambda c: c.start)
 
 
-def collect_pan(cfg: dict, work_dir: Path, date_filter: str | None = None) -> list[Clip]:
+def collect_pan(
+    cfg: dict,
+    work_dir: Path,
+    date_filter: str | None = None,
+    devices: list[str] | None = None,
+) -> list[Clip]:
     from baidu_pan import BaiduPan
 
     pan = BaiduPan(cfg["baidu"]["cookie_file"])
@@ -106,65 +113,132 @@ def collect_pan(cfg: dict, work_dir: Path, date_filter: str | None = None) -> li
     local_root = work_dir / "download"
     local_root.mkdir(parents=True, exist_ok=True)
 
-    days = [date_filter] if date_filter else None
-    if not days:
-        days = [
-            it["server_filename"]
-            for it in pan.list_dir(remote_root)
-            if it.get("isdir")
-        ]
-        # 网盘目录按日期命名，只处理形如 2026-11-06 的
-        days = [d for d in days if re.fullmatch(r"\d{4}-\d{2}-\d{2}", d)]
+    days_filter = date_filter
+    entries = pan.list_dir(remote_root)
+
+    # 网盘布局有两种，都要兼容：
+    #   新：/录音记录/<设备>/2026-11-06/*.aac
+    #   旧：/录音记录/2026-11-06/*.aac        （所有设备混在一起）
+    device_dirs: list[str] = []
+    legacy_days: list[str] = []
+    for it in entries:
+        if not it.get("isdir"):
+            continue
+        name = it.get("server_filename", "")
+        if name.startswith("_"):  # _状态 之类的辅助目录
+            continue
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", name):
+            legacy_days.append(name)
+        else:
+            device_dirs.append(name)
+
+    # (设备名, 远程目录, 本地目录)；设备名空字符串代表旧布局
+    targets: list[tuple[str, str, Path]] = []
+    for dev in sorted(device_dirs):
+        if devices and dev not in devices:
+            continue
+        if days_filter:
+            days = [days_filter]
+        else:
+            try:
+                days = [
+                    d["server_filename"]
+                    for d in pan.list_dir(f"{remote_root}/{dev}")
+                    if d.get("isdir") and re.fullmatch(r"\d{4}-\d{2}-\d{2}", d["server_filename"])
+                ]
+            except Exception as e:
+                print(f"  [跳过] {dev}: {e}")
+                continue
+        for day in sorted(days):
+            targets.append((dev, f"{remote_root}/{dev}/{day}", local_root / dev / day))
+
+    for day in sorted(legacy_days if not days_filter else [days_filter]):
+        if devices:  # 指定设备时不要旧数据
+            break
+        targets.append(("", f"{remote_root}/{day}", local_root / day))
 
     clips: list[Clip] = []
-    for day in sorted(days):
-        remote_day = f"{remote_root}/{day}"
+    for dev, remote_day, local_day in targets:
         try:
             items = pan.list_dir(remote_day)
         except Exception as e:
-            print(f"  [跳过] {remote_day}: {e}")
+            # errno=-9 = 目录不存在。回看窗口里昨天/前天没有目录很正常，不用刷屏
+            if "errno=-9" not in str(e):
+                print(f"  [跳过] {remote_day}: {e}")
             continue
 
-        local_day = local_root / day
         local_day.mkdir(parents=True, exist_ok=True)
+        tag = dev or "旧数据"
 
         for it in items:
             name = it.get("server_filename", "")
-            if not name.endswith(".aac"):
+            if not (name.endswith(".aac") or name.endswith(".txt")):
                 continue
             local_file = local_day / name
             if not local_file.exists():
-                print(f"  下载 {day}/{name} ...", end="", flush=True)
+                print(f"  下载 {tag}/{local_day.name}/{name} ...", end="", flush=True)
                 try:
                     pan.download(f"{remote_day}/{name}", str(local_file))
                     print(" ok")
                 except Exception as e:
                     print(f" 失败: {e}")
                     continue
+            if not name.endswith(".aac"):
+                continue
             c = parse_clip(local_file)
             if c:
+                c.device = dev
                 clips.append(c)
 
     return sorted(clips, key=lambda c: c.start)
 
 
-def load_cached(cache_dir: Path, clip_id: str) -> list[asr_mod.Segment] | None:
-    f = cache_dir / f"{clip_id}.json"
-    if not f.exists():
-        return None
-    try:
-        data = json.loads(f.read_text(encoding="utf-8"))
-        return [asr_mod.Segment(s["start"], s["end"], s["text"]) for s in data]
-    except Exception:
-        return None
+def load_cached(
+    cache_dir: Path, clip_id: str, device: str = ""
+) -> list[asr_mod.Segment] | None:
+    # 先找设备子目录，再回落到根目录（老版本的缓存都平铺在根目录）
+    candidates = [cache_dir / f"{clip_id}.json"]
+    if device:
+        candidates.insert(0, cache_dir / device / f"{clip_id}.json")
+
+    for f in candidates:
+        if not f.exists():
+            continue
+        try:
+            data = json.loads(f.read_text(encoding="utf-8"))
+            return [asr_mod.Segment(s["start"], s["end"], s["text"]) for s in data]
+        except Exception:
+            return None
+    return None
 
 
-def save_cached(cache_dir: Path, clip_id: str, segs: list[asr_mod.Segment]) -> None:
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    (cache_dir / f"{clip_id}.json").write_text(
+def save_cached(
+    cache_dir: Path, clip_id: str, segs: list[asr_mod.Segment], device: str = ""
+) -> None:
+    target = cache_dir / device if device else cache_dir
+    target.mkdir(parents=True, exist_ok=True)
+    (target / f"{clip_id}.json").write_text(
         json.dumps([s.__dict__ for s in segs], ensure_ascii=False, indent=1),
         encoding="utf-8",
     )
+
+
+def read_companion(clip: Clip) -> list[asr_mod.Segment] | None:
+    """
+    手机端转写完会把同名 .txt 一起传上来。
+    有它就直接用，不再调一次 ASR —— 同一段音频花两份钱没有意义。
+    空 txt 代表手机侧确认"这段没人说话"，也是有效结论。
+    """
+    f = clip.path.with_suffix(".txt")
+    if not f.exists():
+        return None
+    try:
+        txt = f.read_text(encoding="utf-8", errors="ignore").strip()
+    except Exception:
+        return None
+    if not txt:
+        return []
+    return [asr_mod.Segment(0.0, clip.seconds, txt)]
 
 
 def build_timeline(
@@ -182,19 +256,24 @@ def build_timeline(
 
     print(f"共 {len(clips)} 片")
     for i, clip in enumerate(clips, 1):
-        segs = load_cached(cache_dir, clip.clip_id)
+        segs = load_cached(cache_dir, clip.clip_id, clip.device)
         if segs is not None:
             hits += 1
         else:
-            print(f"  [{i}/{len(clips)}] {clip.clip_id} ...", end="", flush=True)
-            try:
-                segs = transcriber.transcribe(str(clip.path))
-            except Exception as e:
-                print(f" 失败: {e}")
-                continue
-            save_cached(cache_dir, clip.clip_id, segs)
-            news += 1
-            print(f" {len(segs)} 句" if segs else " 空")
+            segs = read_companion(clip)
+            if segs is not None:
+                save_cached(cache_dir, clip.clip_id, segs, clip.device)
+                hits += 1
+            else:
+                print(f"  [{i}/{len(clips)}] {clip.clip_id} ...", end="", flush=True)
+                try:
+                    segs = transcriber.transcribe(str(clip.path))
+                except Exception as e:
+                    print(f" 失败: {e}")
+                    continue
+                save_cached(cache_dir, clip.clip_id, segs, clip.device)
+                news += 1
+                print(f" {len(segs)} 句" if segs else " 空")
 
         for s in segs:
             lines.append((clip.start + timedelta(seconds=s.start), s.text))

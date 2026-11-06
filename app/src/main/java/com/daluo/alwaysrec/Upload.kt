@@ -11,6 +11,7 @@ import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.MultipartBody
@@ -23,6 +24,8 @@ import org.json.JSONObject
 import java.io.File
 import java.net.URLEncoder
 import java.security.MessageDigest
+import java.text.SimpleDateFormat
+import java.util.Locale
 import java.util.concurrent.TimeUnit
 
 /**
@@ -34,6 +37,12 @@ import java.util.concurrent.TimeUnit
 interface UploadSink {
     /** 返回 true 表示服务端已确认收到，可以安全标记为已上传。 */
     suspend fun upload(meta: SegmentMeta): Boolean
+
+    /**
+     * 这个 sink 是否支持上传伴随文本。
+     * 不支持时不要排队重试 —— 否则每次运行都会攒下一堆永远传不出去的文本。
+     */
+    val supportsCompanion: Boolean get() = false
 
     /**
      * 上传伴随文本（转写结果）。默认不支持。
@@ -234,6 +243,47 @@ class UploadWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx
         private const val UNIQUE_NAME = "always_rec_upload"
         private const val WIFI_UNIQUE = "always_rec_upload_wifi"
         private const val MAX_ATTEMPTS = 20
+        private const val TXT_RETRY = "txtretry"
+
+        private fun retryDir(ctx: Context): File =
+            File(ctx.filesDir, TXT_RETRY).apply { mkdirs() }
+
+        /** 文本上传失败的兜底：音频已经进 done 了，只能把文本单独存一份等下次补传。 */
+        private fun queueCompanion(ctx: Context, id: String, text: String) {
+            runCatching {
+                File(retryDir(ctx), "$id.txt").writeText(text, Charsets.UTF_8)
+            }
+        }
+
+        private suspend fun retryCompanions(ctx: Context, sink: UploadSink) {
+            if (!sink.supportsCompanion) return
+            val files = retryDir(ctx).listFiles { f -> f.name.endsWith(".txt") } ?: return
+            for (f in files) {
+                val id = f.name.removeSuffix(".txt")
+                val started = startedAtOf(id) ?: continue
+                val dummy = SegmentMeta(
+                    id = id,
+                    audio = f,
+                    createdAt = started,
+                    startedAt = started,
+                    durationMs = 0,
+                    bytes = f.length(),
+                    attempts = 0,
+                    uploaded = true,
+                )
+                val ok = runCatching {
+                    sink.uploadCompanion(dummy, f.name, f.readBytes())
+                }.getOrDefault(false)
+                if (ok) f.delete()
+            }
+        }
+
+        /** 片段 id 形如 20261106_114547_1466，用于还原它属于哪一天。 */
+        private fun startedAtOf(id: String): Long? = runCatching {
+            val p = id.split("_")
+            if (p.size < 2) return@runCatching null
+            SimpleDateFormat("yyyyMMddHHmmss", Locale.US).parse(p[0] + p[1])?.time
+        }.getOrNull()
 
         fun schedule(ctx: Context) {
             val constraints = Constraints.Builder()
@@ -287,33 +337,47 @@ class UploadWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx
         val sink: UploadSink = Uploader.current(applicationContext) ?: return Result.success()
         val apiKey = LocalConfig.ALIYUN_API_KEY
 
-        var failed = 0
-        for (meta in spool.pending().take(50)) {
-            if (meta.attempts >= MAX_ATTEMPTS) continue
+        return WorkLock.upload.withLock {
+            // 上次音频传成功、文本没传成功的，先补传（评审报告 P1-2）
+            retryCompanions(applicationContext, sink)
 
-            // 上传前补齐转写：保证云端 aac 和 txt 成对，后端不用再单独跑 ASR
-            var text = runCatching { store.load(meta.id)?.text }.getOrNull()
-            if (text.isNullOrBlank() && apiKey.isNotBlank()) {
-                val r = AliyunAsr.transcribe(meta.audio, apiKey)
-                if (r.text != null) {
-                    store.save(meta.id, r.text)
-                    text = r.text
-                } else if (r.ok) {
-                    store.save(meta.id, "")
-                }
-            }
+            var failed = 0
+            for (meta in spool.pending().take(50)) {
+                if (meta.attempts >= MAX_ATTEMPTS) continue
 
-            val ok = runCatching { sink.upload(meta) }.getOrDefault(false)
-            if (ok && !text.isNullOrBlank()) {
-                runCatching {
-                    sink.uploadCompanion(meta, "${meta.id}.txt", text.toByteArray(Charsets.UTF_8))
+                // 上传前补齐转写：保证云端 aac 和 txt 成对，后端不用再单独跑 ASR
+                // 用 null 判断而不是空白判断 —— 空字符串代表"已经识别过，确认没人说话"，
+                // 不该再调一次 ASR
+                var text = runCatching { store.load(meta.id)?.text }.getOrNull()
+                if (text == null && apiKey.isNotBlank()) {
+                    // 和转写 Worker 互斥，避免同一段被两次 ASR（评审报告 P1-6）
+                    val r = WorkLock.asr.withLock { AliyunAsr.transcribe(meta.audio, apiKey) }
+                    if (r.text != null) {
+                        store.save(meta.id, r.text)
+                        text = r.text
+                    } else if (r.ok) {
+                        store.save(meta.id, "")
+                        text = ""
+                    }
                 }
+
+                val ok = runCatching { sink.upload(meta) }.getOrDefault(false)
+                if (ok && text != null && sink.supportsCompanion) {
+                    // 空结果也传一个占位符：后端据此知道"这段确实没人说话"，
+                    // 而不是"手机没传文本"，从而不再重复识别（评审报告 P1-1）
+                    val payload = if (text.isEmpty()) " " else text
+                    val sent = runCatching {
+                        sink.uploadCompanion(meta, "${meta.id}.txt", payload.toByteArray(Charsets.UTF_8))
+                    }.getOrDefault(false)
+                    // 文本没传上去就排队，下次运行补传；不能默默当成功
+                    if (!sent) queueCompanion(applicationContext, meta.id, payload)
+                }
+                spool.markAttempt(meta, ok)
+                if (!ok) failed++
             }
-            spool.markAttempt(meta, ok)
-            if (!ok) failed++
+            spool.pruneUploaded()
+            if (failed == 0) Result.success() else Result.retry()
         }
-        spool.pruneUploaded()
-        return if (failed == 0) Result.success() else Result.retry()
     }
 }
 
@@ -336,6 +400,7 @@ object Uploader {
                     cookie = cookie,
                     bdstoken = LocalConfig.BAIDU_BDSTOKEN,
                     remoteDir = LocalConfig.BAIDU_DIR,
+                    device = DeviceInfo.folder(ctx),
                 )
             }
 

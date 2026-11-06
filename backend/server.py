@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import threading
 import time
 from dataclasses import dataclass
@@ -57,6 +58,7 @@ RECENT_N = 5
 class Line:
     ts: datetime
     text: str
+    device: str = ""  # 网盘子目录名；空字符串 = 旧布局（所有设备混在一起）
 
 
 def clip_time(clip_id: str) -> datetime | None:
@@ -89,8 +91,16 @@ def is_junk(text: str) -> bool:
 
 
 def load_lines(date: str) -> list[Line]:
+    """
+    转写缓存有两种位置：
+        data/transcripts/<片段>.json          老版本，不分设备
+        data/transcripts/<设备>/<片段>.json   新版本
+    统一读进来，并把设备名带在每一行上。
+    """
+    files = list(TRANS_DIR.glob("*.json")) + list(TRANS_DIR.glob("*/*.json"))
     out: list[Line] = []
-    for f in TRANS_DIR.glob("*.json"):
+    for f in files:
+        device = "" if f.parent == TRANS_DIR else f.parent.name
         start = clip_time(f.stem)
         if not start or start.strftime("%Y-%m-%d") != date:
             continue
@@ -101,44 +111,117 @@ def load_lines(date: str) -> list[Line]:
         for s in segs:
             text = normalize((s.get("text") or "").strip())
             if text and not is_junk(text):
-                out.append(Line(start + timedelta(seconds=s.get("start", 0)), text))
+                out.append(Line(start + timedelta(seconds=s.get("start", 0)), text, device))
     out.sort(key=lambda x: x.ts)
     return out
 
 
-def load_heartbeat() -> dict | None:
-    f = STATUS_DIR / "device.json"
-    if not f.exists():
-        return None
+LEGACY_HB = "device.json"
+
+
+def read_json(path: Path) -> dict | None:
     try:
-        return json.loads(f.read_text(encoding="utf-8"))
+        return json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         return None
 
 
-def collect_stats(date: str) -> dict:
-    """采集与解析的进度统计。"""
-    day_dir = DL_DIR / date
-    clips: list[Path] = sorted(day_dir.glob("*.aac")) if day_dir.exists() else []
+def load_heartbeats() -> tuple[dict[str, dict], dict | None]:
+    """
+    返回 ({设备名: 心跳}, 旧版心跳)。
 
-    total_sec = 0.0
-    total_bytes = 0
-    for c in clips:
-        total_bytes += c.stat().st_size
-        total_sec += probe_duration_ms(c) / 1000.0
+    判定规则：v0.2+ 的心跳里带 "device" 字段，直接按它归类；
+    老版本没有这个字段（文件名可能是 device.json，也可能带时间戳），
+    全部归到"旧数据"一台设备里，取 ts 最新的那条。
+    """
+    devices: dict[str, dict] = {}
+    legacy_pool: list[dict] = []
+    if STATUS_DIR.exists():
+        for f in STATUS_DIR.glob("*.json"):
+            d = read_json(f)
+            if not d:
+                continue
+            name = (d.get("device") or "").strip()
+            if name:
+                devices[name] = d
+            else:
+                legacy_pool.append(d)
+    legacy = max(legacy_pool, key=lambda x: x.get("ts", 0), default=None)
+    return devices, legacy
 
-    parsed = 0
-    for c in clips:
-        # 只要有转写缓存就算已处理，空结果（确认没人说话）也是一种结论
-        if (TRANS_DIR / f"{c.stem}.json").exists():
-            parsed += 1
+
+def display_names(devices: dict[str, dict], legacy: dict | None) -> dict[str, str]:
+    """目录名 → 给人看的名字：优先自定义名，其次机型，最后用目录名。"""
+    names: dict[str, str] = {}
+    for dev, hb in devices.items():
+        names[dev] = (hb.get("alias") or "").strip() or (hb.get("model") or "").strip() or dev
+    names[""] = ((legacy or {}).get("model") or "旧数据").strip()
+    return names
+
+
+def day_dirs(date: str) -> list[tuple[str, Path]]:
+    """当天有音频的目录：[(设备名, 本地目录)]，兼容旧布局。"""
+    out: list[tuple[str, Path]] = []
+    legacy = DL_DIR / date
+    if legacy.is_dir():
+        out.append(("", legacy))
+    if DL_DIR.exists():
+        for dev_dir in DL_DIR.iterdir():
+            if not dev_dir.is_dir():
+                continue
+            d = dev_dir / date
+            if d.is_dir():
+                out.append((dev_dir.name, d))
+    return out
+
+
+def _parsed_marker(device: str, clip_id: str) -> bool:
+    if device:
+        return (TRANS_DIR / device / f"{clip_id}.json").exists()
+    return (TRANS_DIR / f"{clip_id}.json").exists()
+
+
+def collect_stats(date: str, device: str | None = None) -> dict:
+    """采集与解析的进度统计，含按设备拆分。"""
+    per_device = []
+    clips_total = parsed_total = 0
+    sec_total = 0.0
+    bytes_total = 0
+
+    for dev, d in day_dirs(date):
+        if device is not None and dev != device:
+            continue
+        clips = sorted(d.glob("*.aac"))
+        if not clips:
+            continue
+        sec = 0.0
+        nbytes = 0
+        for c in clips:
+            nbytes += c.stat().st_size
+            sec += probe_duration_ms(c) / 1000.0
+        parsed = sum(1 for c in clips if _parsed_marker(dev, c.stem))
+        per_device.append({
+            "device": dev,
+            "clips": len(clips),
+            "parsed": parsed,
+            "seconds": sec,
+            "bytes": nbytes,
+            "minutes": int(sec // 60),
+            "mb": round(nbytes / 1024 / 1024, 1),
+            "rate": round(parsed / len(clips) * 100, 1) if clips else 0,
+        })
+        clips_total += len(clips)
+        parsed_total += parsed
+        sec_total += sec
+        bytes_total += nbytes
 
     return {
-        "clips": len(clips),
-        "parsed": parsed,
-        "seconds": total_sec,
-        "bytes": total_bytes,
-        "rate": (parsed / len(clips) * 100) if clips else 0,
+        "clips": clips_total,
+        "parsed": parsed_total,
+        "seconds": sec_total,
+        "bytes": bytes_total,
+        "rate": (parsed_total / clips_total * 100) if clips_total else 0,
+        "devices": per_device,
     }
 
 
@@ -163,7 +246,7 @@ def fmt_bytes(n: int) -> str:
 
 def newest_mtime(date: str, hour: int | None = None) -> float:
     best = 0.0
-    for p in TRANS_DIR.glob("*.json"):
+    for p in list(TRANS_DIR.glob("*.json")) + list(TRANS_DIR.glob("*/*.json")):
         t = clip_time(p.stem)
         if not t or t.strftime("%Y-%m-%d") != date:
             continue
@@ -224,20 +307,42 @@ def ensure_daily(date: str, lines: list[Line]) -> str | None:
 # 网盘同步
 # --------------------------------------------------------------------------
 
-def sync_once(date: str | None = None) -> dict:
-    result = {"clips": 0, "transcribed": 0, "error": None}
+def recent_dates(days: int = 2) -> list[str]:
+    """最近 N 天（含今天）。跨天补传的数据靠这个窗口自动捡回来。"""
+    now = datetime.now()
+    return [(now - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(max(1, days))]
+
+
+def sync_once(dates: str | list[str] | None = None) -> dict:
+    if isinstance(dates, str):
+        dates = [dates]
+    elif not dates:
+        dates = recent_dates(1)
+
+    result = {"clips": 0, "transcribed": 0, "devices": 0, "days": len(dates), "error": None}
     try:
         pan = BaiduPan(CFG["baidu"]["cookie_file"])
+        remote_status = f'{CFG["baidu"]["remote_dir"].rstrip("/")}/_状态'
+
+        # 每台设备一个心跳文件，全部拉下来
         try:
-            pan.download(
-                f'{CFG["baidu"]["remote_dir"].rstrip("/")}/_状态/device.json',
-                str(STATUS_DIR / "device.json"),
-            )
+            for it in pan.list_dir(remote_status):
+                name = it.get("server_filename", "")
+                if not name.endswith(".json"):
+                    continue
+                try:
+                    pan.download(f"{remote_status}/{name}", str(STATUS_DIR / name))
+                except Exception:
+                    pass
         except Exception:
             pass
 
-        clips = collect_pan(CFG, WORK, date)
+        clips = []
+        for d in dates:
+            clips.extend(collect_pan(CFG, WORK, d))
+
         result["clips"] = len(clips)
+        result["devices"] = len({c.device for c in clips})
         if clips:
             transcriber = asr_mod.build(CFG["asr"])
             _, _, news = build_timeline(clips, transcriber, TRANS_DIR)
@@ -247,11 +352,10 @@ def sync_once(date: str | None = None) -> dict:
     return result
 
 
-def sync_loop(interval: int = 300) -> None:
+def sync_loop(interval: int = 300, days: int = 2) -> None:
     while True:
         try:
-            today = datetime.now().strftime("%Y-%m-%d")
-            r = sync_once(today)
+            r = sync_once(recent_dates(days))
             (WORK / "last_sync.txt").write_text(
                 f"{datetime.now():%H:%M:%S} · {r['clips']} 段 · 新增 {r['transcribed']}"
                 + (f" · {r['error']}" if r["error"] else ""),
@@ -291,6 +395,14 @@ h1{font-size:21px;font-weight:500;margin:0 0 6px;letter-spacing:-.2px}
 .bad{background:#E24B4A;box-shadow:0 0 0 3px rgba(226,75,74,.15)}
 .status b{font-weight:500}
 .status .meta{color:#8A9099;font-size:12px;margin-left:auto;text-align:right}
+.tag{display:inline-block;font-size:11px;color:#5A6472;background:#EEF2F7;
+     border-radius:5px;padding:0 6px;margin-right:7px;line-height:18px;vertical-align:1px}
+.stat-row{display:flex;align-items:baseline;gap:12px;padding:9px 0;border-bottom:1px solid #F3F5F8}
+.stat-row:last-child{border-bottom:none}
+.stat-row .nm{flex:0 0 140px;font-weight:500;font-size:13px}
+.stat-row .mt{color:#8A9099;font-size:12px}
+.stat-row .bar{flex:1;height:4px;background:#EEF1F5;border-radius:2px;overflow:hidden;min-width:40px}
+.stat-row .bar i{display:block;height:100%;background:#1D9E75}
 
 .grid{display:grid;grid-template-columns:repeat(5,1fr);gap:10px;margin-bottom:14px}
 .metric{background:#fff;border:1px solid #E9EDF2;border-radius:12px;padding:14px 16px}
@@ -337,10 +449,18 @@ summary{cursor:pointer;color:#185FA5;font-size:13px;outline:none;user-select:non
   {% endif %}
 </div>
 
+<div id="status-box">
+{% for d in device_status %}
 <div class="status">
-  <span class="dot {{ status_class }}"></span>
-  <b id="st-text">{{ status_text }}</b>
-  <span class="meta" id="st-meta">{{ status_meta }}</span>
+  <span class="dot {{ d.cls }}"></span>
+  <b>{{ d.name }}</b>
+  <span class="meta">{{ d.meta }}</span>
+</div>
+{% endfor %}
+{% if not device_status %}
+<div class="status"><span class="dot bad"></span><b>还没有设备上报</b>
+  <span class="meta">手机上点「开始录音」，10 分钟内会出现</span></div>
+{% endif %}
 </div>
 
 <div class="grid">
@@ -367,11 +487,24 @@ summary{cursor:pointer;color:#185FA5;font-size:13px;outline:none;user-select:non
   </div>
 </div>
 
+{% if stats.devices %}
+<div class="card">
+  <div class="card-title">按设备拆分{% if multi_device %}（{{ stats.devices|length }} 台）{% endif %}</div>
+  {% for d in stats.devices %}
+  <div class="stat-row">
+    <span class="nm">{{ names.get(d.device, d.device or '旧数据') }}</span>
+    <span class="mt">{{ d.clips }} 段 · {{ d.parsed }} 已解析 · {{ d.minutes }} 分 · {{ d.mb }} MB</span>
+    <span class="bar"><i style="width:{{ d.rate }}%"></i></span>
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
+
 <div class="card recent">
   <div class="card-title">最后 {{ recent_n }} 条 <span class="live"><i></i>实时</span></div>
   <div id="recent">
     {% for l in recent %}
-    <div class="row"><span class="t">{{ l.ts.strftime('%H:%M:%S') }}</span><span class="x">{{ l.text }}</span></div>
+    <div class="row"><span class="t">{{ l.ts.strftime('%H:%M:%S') }}</span><span class="x">{% if multi_device %}<span class="tag">{{ names.get(l.device, l.device or '旧数据') }}</span>{% endif %}{{ l.text }}</span></div>
     {% endfor %}
     {% if not recent %}<div class="none">还没有内容</div>{% endif %}
   </div>
@@ -401,7 +534,7 @@ summary{cursor:pointer;color:#185FA5;font-size:13px;outline:none;user-select:non
 <div class="card">
   <div class="hour-head">
     <span class="hour-time">{{ '%02d'|format(h.hour) }}:00 – {{ '%02d'|format(h.hour) }}:59</span>
-    <span class="hour-count">{{ h.count }} 条</span>
+    <span class="hour-count">{{ h.count }} 条{% if multi_device %} · {{ h.devices|join(' · ') }}{% endif %}</span>
   </div>
   <div class="summary {{ 'none' if not h.summary }}">
     {{ h.summary if h.summary else '无有效内容' }}
@@ -409,7 +542,7 @@ summary{cursor:pointer;color:#185FA5;font-size:13px;outline:none;user-select:non
   <details>
     <summary>展开原文（{{ h.lines|length }} 条）</summary>
     {% for l in h.lines %}
-    <div class="line"><span class="t">{{ l.ts.strftime('%H:%M:%S') }}</span><span>{{ l.text }}</span></div>
+    <div class="line"><span class="t">{{ l.ts.strftime('%H:%M:%S') }}</span><span>{% if multi_device %}<span class="tag">{{ names.get(l.device, l.device or '旧数据') }}</span>{% endif %}{{ l.text }}</span></div>
     {% endfor %}
   </details>
 </div>
@@ -424,22 +557,30 @@ summary{cursor:pointer;color:#185FA5;font-size:13px;outline:none;user-select:non
 
 <script>
 var DATE = "{{ date }}";
+var MULTI = {{ 'true' if multi_device else 'false' }};
 function esc(s){var d=document.createElement('div');d.textContent=s;return d.innerHTML;}
 function tick(){
   fetch('/api/live?date=' + DATE).then(function(r){return r.json();}).then(function(d){
-    document.getElementById('st-text').textContent = d.status_text;
-    document.getElementById('st-meta').textContent = d.status_meta;
-    var dot = document.querySelector('.status .dot');
-    dot.className = 'dot ' + d.status_class;
+    var sb = document.getElementById('status-box');
+    sb.innerHTML = d.devices.length
+      ? d.devices.map(function(x){
+          return '<div class="status"><span class="dot ' + x.cls + '"></span><b>' + esc(x.name) +
+                 '</b><span class="meta">' + esc(x.meta) + '</span></div>';
+        }).join('')
+      : '<div class="status"><span class="dot bad"></span><b>还没有设备上报</b>' +
+        '<span class="meta">手机上点「开始录音」，10 分钟内会出现</span></div>';
+
     document.getElementById('m-clips').innerHTML = d.clips + '<span>段</span>';
     document.getElementById('m-parsed').innerHTML = d.parsed + '<span>/' + d.clips + '</span>';
     document.getElementById('m-bar').style.width = d.rate + '%';
     document.getElementById('m-lines').innerHTML = d.lines + '<span>条</span>';
+
     var box = document.getElementById('recent');
     if (d.recent.length === 0) { box.innerHTML = '<div class="none">还没有内容</div>'; }
     else {
       box.innerHTML = d.recent.map(function(x){
-        return '<div class="row"><span class="t">' + x.t + '</span><span class="x">' + esc(x.text) + '</span></div>';
+        var tag = (MULTI && x.dev) ? '<span class="tag">' + esc(x.dev) + '</span>' : '';
+        return '<div class="row"><span class="t">' + x.t + '</span><span class="x">' + tag + esc(x.text) + '</span></div>';
       }).join('');
     }
     if (d.last_sync) document.getElementById('ft').textContent = d.last_sync;
@@ -467,11 +608,56 @@ def status_of(hb: dict | None) -> tuple[str, str, str]:
     return "bad", "设备可能已离线", meta
 
 
+def all_days() -> list[str]:
+    """所有有数据的日期，兼容「根目录直接是日期」的老布局。"""
+    out: set[str] = set()
+    if not DL_DIR.exists():
+        return []
+    for p in DL_DIR.iterdir():
+        if not p.is_dir():
+            continue
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", p.name):
+            out.add(p.name)
+            continue
+        for q in p.iterdir():
+            if q.is_dir() and re.fullmatch(r"\d{4}-\d{2}-\d{2}", q.name):
+                out.add(q.name)
+    return sorted(out, reverse=True)
+
+
+def build_device_status(
+    devices: dict[str, dict], legacy: dict | None, names: dict[str, str], date: str
+) -> list[dict]:
+    rows = []
+    for dev, hb in devices.items():
+        cls, _text, meta = status_of(hb)
+        rows.append({"device": dev, "name": names.get(dev, dev), "cls": cls, "meta": meta})
+
+    if legacy:
+        cls, _text, meta = status_of(legacy)
+        rows.append({"device": "", "name": names[""], "cls": cls, "meta": meta})
+
+    # 有录音但没收到心跳的设备（刚装、或心跳还没传上来）
+    for dev, _d in day_dirs(date):
+        if dev and dev not in devices:
+            rows.append({
+                "device": dev,
+                "name": names.get(dev, dev),
+                "cls": "warn",
+                "meta": "有录音但没收到心跳，检查通知栏是否还在",
+            })
+    return rows
+
+
 @app.route("/")
 def index():
     date = request.args.get("date") or datetime.now().strftime("%Y-%m-%d")
     lines = load_lines(date)
     stats = collect_stats(date)
+
+    heartbeats, legacy = load_heartbeats()
+    names = display_names(heartbeats, legacy)
+    devices_today = {dev for dev, _ in day_dirs(date)}
 
     by_hour: dict[int, list[Line]] = {}
     for l in lines:
@@ -486,6 +672,7 @@ def index():
             "summary": None if (not s or s.strip() == "无有效内容") else s,
             # 原文按时间倒序，跟 App 端保持一致
             "lines": ls[::-1],
+            "devices": sorted({names.get(l.device, l.device or names[""]) for l in ls}),
         })
 
     top = max((len(v) for v in by_hour.values()), default=1) or 1
@@ -494,16 +681,13 @@ def index():
         for h, v in sorted(by_hour.items())
     ]
 
-    cls, text, meta = status_of(load_heartbeat())
     ls_file = WORK / "last_sync.txt"
     last_sync = ls_file.read_text(encoding="utf-8").strip() if ls_file.exists() else None
-
-    days = sorted({p.name for p in DL_DIR.iterdir() if p.is_dir()}, reverse=True) if DL_DIR.exists() else []
 
     return render_template_string(
         PAGE,
         date=date,
-        days=days,
+        days=all_days(),
         hours=hours,
         bars=bars,
         recent=lines[-RECENT_N:][::-1],
@@ -511,12 +695,12 @@ def index():
         daily=ensure_daily(date, lines),
         total_lines=len(lines),
         stats=stats,
+        names=names,
+        multi_device=len(devices_today) > 1,
+        device_status=build_device_status(heartbeats, legacy, names, date),
         duration_html=fmt_seconds(stats["seconds"]),
         size_html=fmt_bytes(stats["bytes"]),
         last_sync=last_sync,
-        status_class=cls,
-        status_text=text,
-        status_meta=meta,
     )
 
 
@@ -525,18 +709,22 @@ def api_live():
     date = request.args.get("date") or datetime.now().strftime("%Y-%m-%d")
     lines = load_lines(date)
     stats = collect_stats(date)
-    cls, text, meta = status_of(load_heartbeat())
+    heartbeats, legacy = load_heartbeats()
+    names = display_names(heartbeats, legacy)
+
     ls_file = WORK / "last_sync.txt"
     return jsonify({
-        "status_class": cls,
-        "status_text": text,
-        "status_meta": meta,
+        "devices": build_device_status(heartbeats, legacy, names, date),
         "clips": stats["clips"],
         "parsed": stats["parsed"],
         "rate": round(stats["rate"], 1),
         "lines": len(lines),
         "recent": [
-            {"t": l.ts.strftime("%H:%M:%S"), "text": l.text}
+            {
+                "t": l.ts.strftime("%H:%M:%S"),
+                "text": l.text,
+                "dev": names.get(l.device, l.device or names[""]),
+            }
             for l in lines[-RECENT_N:][::-1]
         ],
         "last_sync": ls_file.read_text(encoding="utf-8").strip() if ls_file.exists() else None,
@@ -548,12 +736,14 @@ def main() -> int:
     ap.add_argument("--port", type=int, default=8770)
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--no-sync", action="store_true", help="只起页面，不同步网盘")
+    ap.add_argument("--days", type=int, default=2, help="每轮回看最近几天，默认 2（今天+昨天）")
     args = ap.parse_args()
 
     if not args.no_sync:
         # 60 秒一次：本地同步只是列网盘目录，成本很低，但能把"手机刚传上去"
-        # 到你看到页面的延迟压到一分钟内
-        threading.Thread(target=lambda: sync_loop(60), daemon=True).start()
+        # 到你看到页面的延迟压到一分钟内。
+        # 回看 2 天：跨过午夜后，昨天最后一段也能自动补进来（评审报告 P1-5）。
+        threading.Thread(target=lambda: sync_loop(60, args.days), daemon=True).start()
 
     print(f"\n  录音看板: http://{args.host}:{args.port}\n", flush=True)
     app.run(host=args.host, port=args.port, debug=False, use_reloader=False)

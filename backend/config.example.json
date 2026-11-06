@@ -17,10 +17,10 @@
     "initial_prompt": ""
   },
   "llm": {
-    "enabled": false,
+    "enabled": true,
     "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-    "api_key_env": "DASHSCOPE_API_KEY",
-    "model": "qwen-plus"
+    "model": "qwen-plus",
+    "api_key_env": "DASHSCOPE_API_KEY"
   },
   "output_dir": "./output",
   "work_dir": "./data",

@@ -1,7 +1,30 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
 }
+
+/**
+ * 凭据不进源码。
+ *
+ * 开源仓库里的 LocalConfig 全是空值，能编译、能录音，只是不往上传。
+ * 本机真实凭据写在 local.properties（已被 .gitignore 忽略），
+ * 构建时注入成 BuildConfig 常量，APK 里才有值。
+ *
+ * 需要填的键：
+ *   baidu.bduss / baidu.stoken / baidu.bdstoken
+ *   dashscope.key
+ */
+val localProps = Properties().apply {
+    val f = rootProject.file("local.properties")
+    if (f.exists()) f.inputStream().use { load(it) }
+}
+
+fun secret(key: String): String =
+    (localProps.getProperty(key) ?: "")
+        .replace("\\", "\\\\")
+        .replace("\"", "\\\"")
 
 android {
     namespace = "com.daluo.alwaysrec"
@@ -11,8 +34,17 @@ android {
         applicationId = "com.daluo.alwaysrec"
         minSdk = 26
         targetSdk = 36
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = 2
+        versionName = "0.2.0"
+
+        buildConfigField("String", "BAIDU_BDUSS", "\"${secret("baidu.bduss")}\"")
+        buildConfigField("String", "BAIDU_STOKEN", "\"${secret("baidu.stoken")}\"")
+        buildConfigField("String", "BAIDU_BDSTOKEN", "\"${secret("baidu.bdstoken")}\"")
+        buildConfigField("String", "DASHSCOPE_KEY", "\"${secret("dashscope.key")}\"")
+    }
+
+    buildFeatures {
+        buildConfig = true
     }
 
     buildTypes {

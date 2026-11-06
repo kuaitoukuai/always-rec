@@ -34,9 +34,22 @@ class BaiduCookieSink(
     /** 形如 "BDUSS=xxx; STOKEN=yyy" */
     private val cookie: String,
     private val bdstoken: String,
-    /** 网盘目标目录，如 /录音记录 */
+    /** 网盘目标根目录，如 /录音记录 */
     private val remoteDir: String,
+    /** 设备名，用于隔离不同手机的数据；留空则沿用旧布局 */
+    private val device: String = "",
 ) : UploadSink {
+
+    /** 音频与转写的落地目录：/根/设备/日期 */
+    private fun dayDir(ts: Long): String {
+        val base = remoteDir.trimEnd('/')
+        val day = dayFmt.format(Date(ts))
+        return if (device.isBlank()) "$base/$day" else "$base/$device/$day"
+    }
+
+    /** 心跳目录：/根/_状态/设备.json，每台设备一个文件 */
+    private fun statusName(): String =
+        if (device.isBlank()) "device.json" else "$device.json"
 
     private val client = OkHttpClient.Builder()
         .connectTimeout(20, TimeUnit.SECONDS)
@@ -50,17 +63,21 @@ class BaiduCookieSink(
     private val dayFmt = SimpleDateFormat("yyyy-MM-dd", Locale.US)
 
     override suspend fun upload(meta: SegmentMeta): Boolean = withContext(Dispatchers.IO) {
-        uploadFile(meta.audio, "${remoteDir}/${dayFmt.format(Date(meta.startedAt))}", "${meta.id}.aac")
+        uploadFile(meta.audio, dayDir(meta.startedAt), "${meta.id}.aac")
     }
 
     /** 把转写文本一起传上去，后端就不用重复调 ASR 了。 */
+    override val supportsCompanion: Boolean get() = true
+
     override suspend fun uploadCompanion(
         meta: SegmentMeta,
         name: String,
         bytes: ByteArray,
     ): Boolean = withContext(Dispatchers.IO) {
-        val dir = "${remoteDir}/${dayFmt.format(Date(meta.startedAt))}"
-        val tmp = File(meta.audio.parentFile, name)
+        val dir = dayDir(meta.startedAt)
+        // 用独立临时文件：补传时 meta.audio 本身就是那份待补传的 txt，
+        // 直接写它会把自己删掉
+        val tmp = File.createTempFile("companion", ".txt")
         try {
             tmp.writeBytes(bytes)
             uploadFile(tmp, dir, name)
@@ -71,12 +88,12 @@ class BaiduCookieSink(
         }
     }
 
-    /** 心跳状态固定传到一个目录，电脑端轮询这一个文件就够了。 */
+    /** 心跳按设备分开存，电脑端扫 _状态 目录就能列出所有在线设备。 */
     override suspend fun uploadStatus(bytes: ByteArray): Boolean = withContext(Dispatchers.IO) {
         val tmp = File.createTempFile("status", ".json")
         try {
             tmp.writeBytes(bytes)
-            uploadFile(tmp, "$remoteDir/_状态", "device.json")
+            uploadFile(tmp, "$remoteDir/_状态", statusName())
         } catch (t: Throwable) {
             false
         } finally {

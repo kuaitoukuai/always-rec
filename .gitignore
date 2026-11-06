@@ -42,3 +42,6 @@ test_rec.aac
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# adb / uiautomator 调试产物（根目录）
+/*.xml

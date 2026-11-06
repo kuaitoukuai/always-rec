@@ -28,7 +28,12 @@ data class RecConfig(
     /** 静音持续这么久才封片，避免一句话被切成碎片。 */
     val hangoverMs: Int = 5_000,
     /** 单片最长时长，兜底防止一个人连续说 3 小时生成一个巨大文件。 */
-    val maxSegmentMs: Int = 300_000,
+    /**
+     * 单片上限。不要调到 3 分钟以上 ——
+     * qwen3-asr-flash 单次请求对音频时长有上限，超了会整段识别失败。
+     * 2 分钟留了安全余量，坏一片也只损失 2 分钟。
+     */
+    val maxSegmentMs: Int = 120_000,
     /** 短于这个时长的碎片直接丢弃，多半是噪声误触发。 */
     val minSegmentMs: Int = 1_000,
     /**
@@ -294,16 +299,22 @@ class SegmentEngine(
         encoder = enc
         file = f
         segmentId = id
-        startedAt = System.currentTimeMillis()
         voiceFrames = 0
         silenceFrames = 0
         totalFrames = 0
 
-        // 把预缓冲整段先写进去，补回话头
+        // 把预缓冲整段先写进去，补回话头。
+        // 注意时间戳要往回扣：这 8 秒音频是在触发之前录的，
+        // 如果直接用"现在"当开始时间，整条时间线会系统性偏晚最多 8 秒。
+        val openedAt = System.currentTimeMillis()
+        var preFrames = 0L
         ring.drainTo {
             enc.write(it, it.size)
             totalFrames++
+            preFrames++
         }
+        startedAt = openedAt - preFrames * cfg.frameMs
+
         onState(RecordingState(true, id, 0))
     }
 

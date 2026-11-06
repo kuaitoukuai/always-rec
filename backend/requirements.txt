@@ -3,7 +3,10 @@ Flask>=3.0
 requests>=2.31
 zhconv>=1.4
 
-# 可选：仅在使用 asr.backend = "local" 时需要
+# 看板要用它读 AAC 容器时长（没有它就显示 0 分钟）。
+# 之前注成"可选"是错的：只要用网页看板就离不开它。
+av>=14
+
+# 可选：仅当 asr.backend = "local"（本地模型）时需要
 # faster-whisper>=1.0
 # numpy>=1.24
-# av>=14

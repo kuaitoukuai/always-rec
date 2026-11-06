@@ -25,9 +25,6 @@ import java.util.Locale
  */
 object Heartbeat {
 
-    private const val DIR = "/录音记录/_状态"
-    private const val NAME = "device.json"
-
     data class Snapshot(
         val ts: Long,
         val recording: Boolean,
@@ -53,12 +50,17 @@ object Heartbeat {
                     "time",
                     SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date(snap.ts)),
                 )
+                // 设备身份：多台手机同时上报时，电脑端靠这几个字段区分
+                put("device", DeviceInfo.folder(ctx))
+                put("device_id", DeviceInfo.id(ctx))
+                put("alias", DeviceInfo.alias(ctx) ?: "")
+                put("model", DeviceInfo.model())
                 put("recording", snap.recording)
                 put("pending", snap.pending)
                 put("battery", snap.battery)
                 put("charging", snap.charging)
-                put("model", "${Build.MANUFACTURER} ${Build.MODEL}")
                 put("app", "AlwaysRec")
+                put("version", BuildConfig.VERSION_NAME)
             }
 
             // 本地留一份，App 内可以直接读
@@ -99,10 +101,4 @@ object Heartbeat {
         status == BatteryManager.BATTERY_STATUS_CHARGING ||
             status == BatteryManager.BATTERY_STATUS_FULL
     }.getOrDefault(false)
-
-    /** Build 在 object 里不能直接用，这里偷个懒取静态值。 */
-    private object Build {
-        val MANUFACTURER: String get() = android.os.Build.MANUFACTURER
-        val MODEL: String get() = android.os.Build.MODEL
-    }
 }

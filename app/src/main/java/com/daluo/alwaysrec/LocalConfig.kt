@@ -1,39 +1,42 @@
 package com.daluo.alwaysrec
 
 /**
- * 本地配置。
+ * 配置入口。
  *
- * ⚠️ 这个文件里的值全部需要你自己填。默认留空，填错不会崩，只是对应功能不可用。
- * ⚠️ 填完**不要提交到 Git**，这个文件已列入 .gitignore 的例外清单之外——
- *    如果你 fork 后要提交，请用 `git update-index --skip-worktree` 保护它。
+ * ⚠️ 真实凭据不写在这个文件里 —— 开源仓库中的这几个值都是空的。
+ *    本机的值放在根目录 local.properties（已被 .gitignore 忽略），
+ *    构建时由 app/build.gradle.kts 注入成 BuildConfig 常量。
  *
- * 个人自用直接改这里重新编译，不提供设置界面。
+ * 留空不会崩，只是对应功能不可用：
+ *   没有网盘凭据 → 只录音，不上传
+ *   没有 dashscope key → 不转写，不生成概要
  */
 object LocalConfig {
 
-    /** "none"（只录不上传） / "http"（自建服务） / "baidu"（百度网盘） */
-    const val UPLOAD_MODE = "none"
-
-    // ---- 自建 HTTP ----
+    // ---- 自建 HTTP（可留空）----
     const val HTTP_BASE_URL = ""
     const val HTTP_TOKEN = ""
 
     // ---- 百度网盘（网页版接口，无需 appKey）----
-    /**
-     * 三个值都来自浏览器登录 pan.baidu.com 后的 cookie。
-     * 获取方式见 docs/SETUP.md「百度网盘凭据」一节。
-     */
-    const val BAIDU_BDUSS = ""
-    const val BAIDU_STOKEN = ""
-    const val BAIDU_BDSTOKEN = ""
+    val BAIDU_BDUSS: String = BuildConfig.BAIDU_BDUSS
+    val BAIDU_STOKEN: String = BuildConfig.BAIDU_STOKEN
+    val BAIDU_BDSTOKEN: String = BuildConfig.BAIDU_BDSTOKEN
 
     /**
-     * 必须是根目录下的普通文件夹。
-     * 不要用 /apps/xxx —— 那是「我的应用数据」，网盘客户端默认不显示。
+     * 网盘根目录。每台设备会在它下面建自己的子目录：
+     *   /录音记录/<设备名>/2026-11-06/xxx.aac
+     * 必须是普通目录；不要用 /apps/（那是「我的应用数据」，客户端默认不显示）。
      */
     const val BAIDU_DIR = "/录音记录"
 
     // ---- 阿里云百炼（语音转写 + 摘要）----
     /** 同一个 key 既用于 qwen3-asr-flash 转写，也用于 qwen-plus 摘要 */
-    const val ALIYUN_API_KEY = ""
+    val ALIYUN_API_KEY: String = BuildConfig.DASHSCOPE_KEY
+
+    /** "none" / "http" / "baidu"。有网盘凭据就自动走网盘。 */
+    val UPLOAD_MODE: String = when {
+        BAIDU_BDUSS.isNotBlank() -> "baidu"
+        HTTP_BASE_URL.isNotBlank() -> "http"
+        else -> "none"
+    }
 }

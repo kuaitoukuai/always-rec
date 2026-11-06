@@ -79,6 +79,20 @@
 - 每小时 AI 概要 + 时段分布图
 - 当日总览（要点 + 待办）
 
+## 多设备
+
+同一个 APK 可以装在多台手机上，数据互不干扰：
+
+| 内容 | 布局 |
+|---|---|
+| 音频 | `/录音记录/<设备名>/<日期>/<片段>.aac` |
+| 转写 | 同目录同名 `.txt`（后端优先复用，不重复调 ASR） |
+| 心跳 | `/录音记录/_状态/<设备名>.json` |
+| 看板 | 顶部按设备列在线状态，指标区按设备拆分，每条记录带设备标签 |
+
+设备名默认是「机型-哈希」，可用 `files/device_name.txt` 改成「备用机」这种（见 SETUP 4.1.1）。
+0.1.x 的旧目录 `/录音记录/<日期>/` 仍会被读取，按机型名归为一台设备。
+
 ## 快速开始
 
 ```bash
@@ -96,7 +110,18 @@ cp backend/config.example.json backend/config.json
 # 填入阿里云 API Key 和百度网盘 cookie 路径
 ```
 
-同时在 `app/src/main/java/com/daluo/alwaysrec/LocalConfig.kt` 里填同样的值。
+同时在**根目录** `local.properties` 里填 App 侧凭据（这个文件已被 `.gitignore` 忽略，
+构建时注入成 `BuildConfig` 常量，所以源码里看不到明文）：
+
+```properties
+sdk.dir=D:/tools/android-sdk
+baidu.bduss=...
+baidu.stoken=...
+baidu.bdstoken=...
+dashscope.key=sk-...
+```
+
+留空也能编译运行，只是不上传、不转写。
 
 **2. 编译安装 App**
 
@@ -130,8 +155,10 @@ always-rec/
 │       ├── Spool.kt              本地分片队列与统计
 │       ├── TranscriptStore.kt    转写结果本地仓库
 │       ├── SummaryActivity.kt    「今日记录」页
-│       ├── Heartbeat.kt          心跳上报
-│       └── LocalConfig.kt        ⚠️ 凭据占位，需自行填写
+│       ├── Heartbeat.kt          心跳上报（含设备身份）
+│       ├── DeviceInfo.kt         设备身份：名字 / id / 网盘目录隔离
+│       ├── WorkLock.kt           转写与上传的协程级互斥锁
+│       └── LocalConfig.kt        配置入口（值构建时从 local.properties 注入）
 ├── backend/                      后端处理链
 │   ├── server.py                 看板服务 + 同步线程 + 小时/日概要
 │   ├── pipeline.py               批处理管线（收集 → 转写 → 清洗 → 输出）

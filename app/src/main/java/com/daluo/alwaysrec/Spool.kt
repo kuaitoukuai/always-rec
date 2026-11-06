@@ -62,6 +62,48 @@ class Spool(context: Context, private val keepDays: Int = 3) {
             ?.sortedBy { it.createdAt }
             ?: emptyList()
 
+    /**
+     * 抢救孤儿片段。
+     *
+     * 进程被杀 / 崩溃时，正在写的那一片只有 .aac，没有 .meta，
+     * 而 pending() 只认 .meta —— 结果这段音频永远传不出去，也不会报错。
+     * ADTS 每帧自带头，残缺文件照样能解码，所以启动时补一份 meta 把它救回来。
+     *
+     * 时长填 0：不重新解码，后端会用容器时长补上。
+     */
+    fun recoverOrphans(): Int {
+        val have = pendingDir.listFiles { f -> f.name.endsWith(".meta") }
+            ?.map { it.name.removeSuffix(".meta") }
+            ?.toHashSet()
+            ?: hashSetOf()
+
+        var n = 0
+        pendingDir.listFiles { f -> f.name.endsWith(".aac") }?.forEach { f ->
+            val id = f.name.removeSuffix(".aac")
+            if (id in have || f.length() < 2_048) return@forEach
+
+            val started = runCatching {
+                stamp.parse(id.substringBeforeLast('_'))?.time
+            }.getOrNull() ?: f.lastModified()
+
+            val p = Properties().apply {
+                setProperty("id", id)
+                setProperty("createdAt", f.lastModified().toString())
+                setProperty("startedAt", started.toString())
+                setProperty("durationMs", "0")
+                setProperty("bytes", f.length().toString())
+                setProperty("attempts", "0")
+                setProperty("uploaded", "false")
+                setProperty("recovered", "true")
+            }
+            runCatching {
+                File(pendingDir, "$id.meta").outputStream().use { p.store(it, null) }
+                n++
+            }
+        }
+        return n
+    }
+
     fun markAttempt(meta: SegmentMeta, success: Boolean) {
         val metaFile = File(pendingDir, "${meta.id}.meta")
         if (!metaFile.exists()) return
