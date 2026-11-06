@@ -155,7 +155,10 @@ def display_names(devices: dict[str, dict], legacy: dict | None) -> dict[str, st
     names: dict[str, str] = {}
     for dev, hb in devices.items():
         names[dev] = (hb.get("alias") or "").strip() or (hb.get("model") or "").strip() or dev
-    names[""] = ((legacy or {}).get("model") or "旧数据").strip()
+
+    # 旧布局没有设备名，只有机型。加「旧数据」后缀，避免和升级后同名设备混淆
+    legacy_model = ((legacy or {}).get("model") or "").strip()
+    names[""] = f"{legacy_model} · 旧数据" if legacy_model else "旧数据"
     return names
 
 
