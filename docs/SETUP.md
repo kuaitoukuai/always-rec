@@ -105,10 +105,10 @@ App 侧不要改源码，写在根目录 `local.properties`（已被 `.gitignore
 
 ```properties
 sdk.dir=D:/tools/android-sdk
-baidu.bduss=9ibTAyZ05...        # 同 baidu_cookies.json 的 cookies.BDUSS
-baidu.stoken=1892ae98...        # cookies.STOKEN
-baidu.bdstoken=674863b6...      # baidu_cookies.json 顶层的 bdstoken
-dashscope.key=sk-...
+baidu.bduss=<你的 BDUSS>            # 192 字符，来自 cookies.BDUSS
+baidu.stoken=<你的 STOKEN>          # 64 字符，来自 cookies.STOKEN
+baidu.bdstoken=<你的 BDSTOKEN>      # 32 字符，来自 baidu_cookies.json 顶层 bdstoken
+dashscope.key=sk-xxxxxxxxxxxxxxxx   # 阿里云百炼 API Key
 ```
 
 `app/build.gradle.kts` 会在构建时把这些值注入成 `BuildConfig.BAIDU_BDUSS` 等常量，
