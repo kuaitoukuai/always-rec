@@ -82,7 +82,10 @@
 ## 快速开始
 
 ```bash
+# Gitee（国内访问快）
 git clone https://gitee.com/smallpencil/always-rec.git
+# GitHub
+git clone https://github.com/kuaitoukuai/always-rec.git
 cd always-rec
 ```
 
