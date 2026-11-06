@@ -143,7 +143,11 @@ def load_heartbeats() -> tuple[dict[str, dict], dict | None]:
                 continue
             name = (d.get("device") or "").strip()
             if name:
-                devices[name] = d
+                # 网盘对同名文件是「重命名」而不是覆盖，同一个设备会有多份心跳。
+                # 必须按 ts 取最新，否则可能读到旧的那份，显示成"心跳延迟"。
+                prev = devices.get(name)
+                if prev is None or int(d.get("ts") or 0) >= int(prev.get("ts") or 0):
+                    devices[name] = d
             else:
                 legacy_pool.append(d)
     legacy = max(legacy_pool, key=lambda x: x.get("ts", 0), default=None)
@@ -339,6 +343,15 @@ def sync_once(dates: str | list[str] | None = None) -> dict:
                     pass
         except Exception:
             pass
+
+        # 本地心跳缓存留 3 天就够；网盘上的副本不动（删接口未验证，宁可不删）
+        cutoff = time.time() - 3 * 86400
+        for f in STATUS_DIR.glob("*.json"):
+            try:
+                if f.stat().st_mtime < cutoff:
+                    f.unlink()
+            except OSError:
+                pass
 
         clips = []
         for d in dates:
